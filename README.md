@@ -187,13 +187,10 @@ Shows:
 - total CVs uploaded
 - percentage passed after CV filter
 - percentage advanced after chatbot interview
-- ranking after CV filtering
-- ranking after interview
-- candidate details
+- consolidated candidate rankings (embedding, LLM CV score, CV combined score, interview score, final ranking score)
+- candidate details with extracted CV data
 - CSV export
-- bias audit
-- synthetic evaluation metrics
-- radar chart explanation
+- candidate explanation radar chart (explainability panel retained; bias audit and synthetic evaluation panels were removed from the demo to keep the UI focused)
 
 The final ranking uses:
 
@@ -237,23 +234,18 @@ Scores in `src/scoring/scorer.py` are normalized to `0-100`. Some earlier app mo
 After the chatbot interview finishes, the final report includes:
 
 ```text
+interview_score: 0-100
 final_chat_score: 0-100
 recommendation: advance | hold | reject
 ```
 
-The backend normalizes it:
+The backend now keeps `interview_score` on a 0-100 scale and computes the final ranking score as:
 
 ```text
-interview_score = final_chat_score / 100
+final_ranking_score = 0.4 * cv_filter_score + 0.6 * interview_score
 ```
 
-Then computes the final ranking score:
-
-```text
-combined_final_score = 0.4 * cv_score + 0.6 * interview_score
-```
-
-This means the interview has more influence after the candidate reaches the shortlist.
+Both `cv_filter_score` and `interview_score` are 0-100, so `final_ranking_score` is also 0-100. The interview therefore has greater influence in the final combined ranking.
 
 ## Why Groq
 
@@ -275,12 +267,15 @@ groq_client = OpenAI(
 ```text
 GET  /health
 POST /jobs
+GET  /jobs
+GET  /jobs/{job_id}/candidates
 POST /jobs/{job_id}/candidates/upload
 GET  /jobs/{job_id}/shortlist
 GET  /jobs/{job_id}/final-ranking
 POST /candidates/{candidate_id}/interview/start
 POST /candidates/{candidate_id}/interview/{session_id}/answer
 GET  /candidates/{candidate_id}/interview/{session_id}/report
+GET  /candidates/{candidate_id}
 GET  /candidates/{candidate_id}/explain
 ```
 
