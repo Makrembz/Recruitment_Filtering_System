@@ -105,6 +105,13 @@ class JobCreated(BaseModel):
     job_id: int
 
 
+class JobSummary(BaseModel):
+    job_id: int
+    title: str
+    description: str
+    requirements: dict[str, Any] | list[Any] | str | None = None
+
+
 class CandidateUploadResult(BaseModel):
     candidate_id: int
     name: str | None
@@ -182,6 +189,22 @@ async def create_job(payload: JobCreate, db: Session = Depends(get_db)) -> JobCr
     db.commit()
     db.refresh(job)
     return JobCreated(job_id=job.id)
+
+
+@app.get("/jobs", response_model=list[JobSummary])
+def list_jobs(db: Session = Depends(get_db)) -> list[JobSummary]:
+    jobs = db.query(Job).order_by(Job.created_at.desc()).all()
+    result: list[JobSummary] = []
+    for job in jobs:
+        result.append(
+            JobSummary(
+                job_id=job.id,
+                title=job.title,
+                description=job.description,
+                requirements=_json_loads(job.requirements_json, {}),
+            )
+        )
+    return result
 
 
 @app.post("/jobs/{job_id}/candidates/upload", response_model=list[CandidateUploadResult])

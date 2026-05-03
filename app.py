@@ -153,6 +153,27 @@ def candidates_table(candidates: list[dict[str, Any]]) -> pd.DataFrame:
 def page_job_setup() -> None:
     st.title("Job Setup")
     st.caption("Create the role profile that CVs will be parsed and scored against.")
+    # Load existing jobs from the backend so users can reuse stored jobs
+    jobs: list[dict[str, Any]] = []
+    try:
+        jobs = request_json("GET", "/jobs")
+    except requests.RequestException:
+        jobs = []
+
+    job_options = {f"#{j['job_id']} - {j['title']}": j for j in jobs}
+    selected_job_label = st.selectbox("Load existing job (or leave blank to create new)", [""] + list(job_options.keys()))
+    if selected_job_label:
+        job = job_options[selected_job_label]
+        if st.button("Use this job"):
+            st.session_state.job_id = job.get("job_id")
+            st.session_state.job_title = job.get("title") or ""
+            st.session_state.job_description = job.get("description") or ""
+            reqs = job.get("requirements") or {}
+            if isinstance(reqs, dict) and reqs.get("required_skills"):
+                st.session_state.required_skills = ", ".join(reqs.get("required_skills") or [])
+            else:
+                st.session_state.required_skills = str(reqs)
+            st.success(f"Loaded job #{st.session_state.job_id}")
 
     with st.form("job_setup_form"):
         title = st.text_input("Job title", value=st.session_state.job_title)
@@ -367,35 +388,20 @@ def page_dashboard() -> None:
     except requests.RequestException:
         pass
 
-    table = dashboard_table(candidates)
-    if not table.empty:
-        st.subheader("After CV Filter")
-        cv_ranking = table.sort_values(by="CV Score", ascending=False, na_position="last")
-        st.dataframe(cv_ranking, use_container_width=True, hide_index=True)
-
-        st.subheader("After Interview")
-        final_table = final_ranking_table(st.session_state.final_ranking)
-        if final_table.empty:
-            st.info("No candidates have completed the interview yet.")
-        else:
-            st.dataframe(final_table, use_container_width=True, hide_index=True)
+    consolidated = consolidated_ranking_table(candidates, st.session_state.final_ranking)
+    if not consolidated.empty:
+        st.subheader("Candidate Rankings")
+        st.dataframe(consolidated, use_container_width=True, hide_index=True)
 
         show_candidate_explanation_radar(candidates)
 
-        csv_bytes = cv_ranking.to_csv(index=False).encode("utf-8")
+        csv_bytes = consolidated.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "Export CV Ranking to CSV",
+            "Export Candidate Rankings to CSV",
             data=csv_bytes,
-            file_name="candidate_shortlist.csv",
+            file_name="candidate_rankings.csv",
             mime="text/csv",
         )
-        if not final_table.empty:
-            st.download_button(
-                "Export Final Ranking to CSV",
-                data=final_table.to_csv(index=False).encode("utf-8"),
-                file_name="candidate_final_ranking.csv",
-                mime="text/csv",
-            )
 
         st.subheader("Candidate details")
         for candidate in candidates:
@@ -441,6 +447,42 @@ def final_ranking_table(final_ranking: list[dict[str, Any]]) -> pd.DataFrame:
         return table
     sortable = table["Final Ranking Score"].replace("—", float("-inf"))
     return table.assign(_sort=sortable).sort_values(by="_sort", ascending=False).drop(columns=["_sort"])
+
+
+def consolidated_ranking_table(candidates: list[dict[str, Any]], final_ranking: list[dict[str, Any]]) -> pd.DataFrame:
+    """Build a single table containing embedding score, LLM CV score, CV combined score,
+    interview score, final ranking score, status, rank, and name.
+    Sort by final_ranking_score desc when available, otherwise by CV combined score."""
+    rows = []
+    by_final = {item["candidate_id"]: item for item in final_ranking or []}
+    for candidate in candidates:
+        fid = candidate.get("candidate_id")
+        final = by_final.get(fid, {})
+        emb = candidate.get("similarity_score")
+        llm_cv = candidate.get("llm_score")
+        cv_combined = candidate.get("weighted_score") or candidate.get("score") or 0.0
+        interview = candidate.get("interview_score")
+        final_score = candidate.get("final_ranking_score") or final.get("final_ranking_score")
+        status = candidate.get("status") or final.get("status") or ("Not Started" if interview is None else (candidate.get("recommendation") or "hold"))
+        rows.append(
+            {
+                "Name": candidate.get("name"),
+                "Embedding Score": round(float(emb or 0.0), 2),
+                "LLM CV Score": round(float(llm_cv or 0.0), 2),
+                "CV Combined Score": round(float(cv_combined), 2),
+                "Interview Score": "—" if interview is None else round(float(interview), 2),
+                "Final Ranking Score": "—" if final_score is None else round(float(final_score), 2),
+                "Status": str(status).title(),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    # Sort by Final Ranking Score when present, else by CV Combined Score
+    df["_final_sort"] = df["Final Ranking Score"].apply(lambda v: float(v) if v != "—" else float("-inf"))
+    df = df.sort_values(by=["_final_sort", "CV Combined Score"], ascending=[False, False]).drop(columns=["_final_sort"])
+    df.insert(0, "Rank", range(1, len(df) + 1))
+    return df
 
 
 def show_final_report(interview: dict[str, Any]) -> None:
