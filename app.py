@@ -224,6 +224,14 @@ def page_upload_filter() -> None:
     st.title("Upload & Filter CVs")
     require_job()
 
+    # Auto-load candidates from database for this job if not already loaded
+    if not st.session_state.candidates and st.session_state.job_id:
+        try:
+            stored = request_json("GET", f"/jobs/{st.session_state.job_id}/candidates")
+            upsert_candidates(stored)
+        except requests.RequestException:
+            pass
+
     files = st.file_uploader(
         "Upload PDF or DOCX CVs",
         type=["pdf", "docx"],
@@ -277,6 +285,45 @@ def page_upload_filter() -> None:
         chart_data = table[["Name", "Score"]].set_index("Name")
         st.subheader("Score distribution")
         st.bar_chart(chart_data)
+
+        st.subheader("Extracted CV Information")
+        for candidate in sorted_candidates:
+            with st.expander(f"View extracted data: {candidate.get('name')}"):
+                try:
+                    cv_details = request_json("GET", f"/candidates/{candidate['candidate_id']}")
+                    parsed = cv_details.get("parsed_cv", {})
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("**Contact Information**")
+                        st.write(f"Email: {parsed.get('email') or 'N/A'}")
+                        st.write(f"Phone: {parsed.get('phone') or 'N/A'}")
+                        
+                        st.markdown("**Education**")
+                        for edu in parsed.get("education", []):
+                            st.write(f"- {edu.get('degree') or 'Unknown'} from {edu.get('institution') or 'Unknown'} ({edu.get('year') or '?'})")
+                    
+                    with col2:
+                        st.markdown("**Skills**")
+                        skills = parsed.get("skills", [])
+                        st.write(", ".join(skills) if skills else "No skills extracted")
+                        
+                        st.markdown("**Languages**")
+                        langs = parsed.get("languages", [])
+                        st.write(", ".join(langs) if langs else "No languages extracted")
+                        
+                        st.markdown("**Certifications**")
+                        certs = parsed.get("certifications", [])
+                        st.write(", ".join(certs) if certs else "No certifications extracted")
+                    
+                    st.markdown("**Experience**")
+                    for exp in parsed.get("experience", []):
+                        st.write(f"**{exp.get('title') or 'Unknown'}** at {exp.get('company') or 'Unknown'}")
+                        st.write(f"Duration: {exp.get('duration_months') or '?'} months")
+                        st.write(f"Description: {exp.get('description') or 'N/A'}")
+                        st.divider()
+                except requests.RequestException as exc:
+                    st.warning(f"Could not fetch CV details: {exc}")
     else:
         st.info("Upload CVs to see filtering results.")
 

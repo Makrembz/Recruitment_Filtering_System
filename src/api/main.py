@@ -207,6 +207,30 @@ def list_jobs(db: Session = Depends(get_db)) -> list[JobSummary]:
     return result
 
 
+@app.get("/jobs/{job_id}/candidates", response_model=list[CandidateUploadResult])
+async def get_job_candidates(
+    job_id: int,
+    db: Session = Depends(get_db),
+) -> list[CandidateUploadResult]:
+    _get_job_or_404(db, job_id)
+    candidates = db.query(Candidate).filter(Candidate.job_id == job_id).order_by(Candidate.created_at.desc()).all()
+    result: list[CandidateUploadResult] = []
+    for candidate in candidates:
+        result.append(
+            CandidateUploadResult(
+                candidate_id=candidate.id,
+                name=candidate.name,
+                score=candidate.weighted_score,
+                similarity_score=candidate.similarity_score,
+                llm_score=candidate.llm_score,
+                weighted_score=candidate.weighted_score,
+                passed_filter=candidate.passed_filter,
+                llm_justification=_json_loads(candidate.justification_json, []),
+            )
+        )
+    return result
+
+
 @app.post("/jobs/{job_id}/candidates/upload", response_model=list[CandidateUploadResult])
 async def upload_candidates(
     job_id: int,
@@ -391,6 +415,23 @@ async def interview_report(
         _apply_interview_result(candidate, report)
         db.commit()
     return report
+
+
+@app.get("/candidates/{candidate_id}")
+async def get_candidate(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    candidate = _get_candidate_or_404(db, candidate_id)
+    return {
+        "candidate_id": candidate.id,
+        "name": candidate.name,
+        "parsed_cv": _json_loads(candidate.parsed_cv_json, {}),
+        "similarity_score": candidate.similarity_score,
+        "llm_score": candidate.llm_score,
+        "weighted_score": candidate.weighted_score,
+        "passed_filter": candidate.passed_filter,
+    }
 
 
 @app.get("/candidates/{candidate_id}/explain")
