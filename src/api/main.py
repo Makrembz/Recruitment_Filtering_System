@@ -207,6 +207,34 @@ def list_jobs(db: Session = Depends(get_db)) -> list[JobSummary]:
     return result
 
 
+@app.get("/jobs/{job_id}/interviews")
+async def get_job_interviews(
+    job_id: int,
+    db: Session = Depends(get_db),
+) -> list[dict[str, Any]]:
+    _get_job_or_404(db, job_id)
+    sessions = (
+        db.query(InterviewSession)
+        .join(Candidate)
+        .filter(Candidate.job_id == job_id)
+        .order_by(InterviewSession.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "session_id": session.id,
+            "candidate_id": session.candidate_id,
+            "candidate_name": session.candidate.name if session.candidate else None,
+            "complete": session.is_complete,
+            "messages": _messages_from_state(_json_loads(session.state_json, {})),
+            "report": _json_loads(session.final_report_json, {}) if session.final_report_json else None,
+            "state": _json_loads(session.state_json, {}),
+            "created_at": session.created_at.isoformat() if session.created_at else None,
+        }
+        for session in sessions
+    ]
+
+
 @app.get("/jobs/{job_id}/candidates", response_model=list[CandidateUploadResult])
 async def get_job_candidates(
     job_id: int,
@@ -516,6 +544,18 @@ def _rebuild_memory(bot: InterviewBot) -> None:
         bot.memory.chat_memory.add_ai_message(question)
         if index < len(state.answers_given):
             bot.memory.chat_memory.add_user_message(state.answers_given[index])
+
+
+def _messages_from_state(state_data: dict[str, Any]) -> list[dict[str, str]]:
+    questions = state_data.get("questions_asked") or []
+    answers = state_data.get("answers_given") or []
+    messages: list[dict[str, str]] = []
+    for index, question in enumerate(questions):
+        if question:
+            messages.append({"role": "assistant", "content": str(question)})
+        if index < len(answers) and answers[index]:
+            messages.append({"role": "user", "content": str(answers[index])})
+    return messages
 
 
 def _state_to_dict(state: InterviewState | None) -> dict[str, Any]:

@@ -48,6 +48,7 @@ def init_state() -> None:
     defaults = {
         "api_url": "http://localhost:8000",
         "job_id": None,
+        "loaded_job_id": None,
         "job_title": "",
         "job_description": "",
         "required_skills": "",
@@ -71,6 +72,49 @@ def request_json(method: str, path: str, **kwargs: Any) -> Any:
     response = requests.request(method, api_url(path), timeout=240, **kwargs)
     response.raise_for_status()
     return response.json()
+
+
+def hydrate_job_context() -> None:
+    job_id = st.session_state.job_id
+    if not job_id:
+        return
+    if st.session_state.loaded_job_id == job_id and st.session_state.candidates and st.session_state.interviews:
+        return
+
+    if st.session_state.loaded_job_id != job_id:
+        st.session_state.candidates = []
+        st.session_state.shortlist = []
+        st.session_state.final_ranking = []
+        st.session_state.interviews = {}
+        st.session_state.candidate_breakdowns = {}
+
+    try:
+        stored_candidates = request_json("GET", f"/jobs/{job_id}/candidates")
+        upsert_candidates(stored_candidates)
+    except requests.RequestException:
+        st.session_state.candidates = st.session_state.candidates or []
+
+    try:
+        stored_interviews = request_json("GET", f"/jobs/{job_id}/interviews")
+        interview_state: dict[str, dict[str, Any]] = {}
+        for interview in stored_interviews:
+            candidate_key = str(interview.get("candidate_id"))
+            state_data = interview.get("state") or {}
+            question_index = state_data.get("question_index", 0)
+            planned_questions = state_data.get("planned_questions", [])
+            interview_state[candidate_key] = {
+                "session_id": interview.get("session_id"),
+                "messages": interview.get("messages") or [],
+                "complete": bool(interview.get("complete")),
+                "report": interview.get("report"),
+                "question_index": question_index,
+                "planned_questions": planned_questions,
+            }
+        st.session_state.interviews = interview_state
+    except requests.RequestException:
+        st.session_state.interviews = st.session_state.interviews or {}
+
+    st.session_state.loaded_job_id = job_id
 
 
 def refresh_shortlist() -> list[dict[str, Any]]:
@@ -173,6 +217,8 @@ def page_job_setup() -> None:
                 st.session_state.required_skills = ", ".join(reqs.get("required_skills") or [])
             else:
                 st.session_state.required_skills = str(reqs)
+            st.session_state.loaded_job_id = None
+            hydrate_job_context()
             st.success(f"Loaded job #{st.session_state.job_id}")
 
     with st.form("job_setup_form"):
@@ -212,6 +258,7 @@ def page_job_setup() -> None:
             st.session_state.final_ranking = []
             st.session_state.interviews = {}
             st.session_state.candidate_breakdowns = {}
+            st.session_state.loaded_job_id = None
             st.success(f"Job created. Current job ID: {st.session_state.job_id}")
         except requests.RequestException as exc:
             st.error(f"Could not create job: {exc}")
@@ -224,13 +271,7 @@ def page_upload_filter() -> None:
     st.title("Upload & Filter CVs")
     require_job()
 
-    # Auto-load candidates from database for this job if not already loaded
-    if not st.session_state.candidates and st.session_state.job_id:
-        try:
-            stored = request_json("GET", f"/jobs/{st.session_state.job_id}/candidates")
-            upsert_candidates(stored)
-        except requests.RequestException:
-            pass
+    hydrate_job_context()
 
     files = st.file_uploader(
         "Upload PDF or DOCX CVs",
@@ -332,6 +373,8 @@ def page_chatbot() -> None:
     st.title("Chatbot Interview")
     require_job()
 
+    hydrate_job_context()
+
     try:
         shortlist = refresh_shortlist()
     except requests.RequestException as exc:
@@ -353,7 +396,14 @@ def page_chatbot() -> None:
 
     interview = st.session_state.interviews.setdefault(
         interview_key,
-        {"messages": [], "session_id": None, "complete": False, "report": None},
+        {
+            "messages": [],
+            "session_id": None,
+            "complete": False,
+            "report": None,
+            "question_index": 0,
+            "planned_questions": [],
+        },
     )
 
     if not interview["session_id"]:
@@ -362,11 +412,27 @@ def page_chatbot() -> None:
                 result = request_json("POST", f"/candidates/{candidate_id}/interview/start")
                 interview["session_id"] = result["session_id"]
                 interview["messages"].append({"role": "assistant", "content": result["first_question"]})
+                interview["question_index"] = 0
+                interview["planned_questions"] = []
                 st.session_state.active_session_id = result["session_id"]
                 st.rerun()
             except requests.RequestException as exc:
                 st.error(f"Could not start interview: {exc}")
         return
+
+    # Display progress indicator
+    question_index = interview.get("question_index", 0)
+    planned_questions = interview.get("planned_questions", [])
+    total_questions = len(planned_questions) if planned_questions else "?"
+    
+    if not interview["complete"] and (question_index > 0 or planned_questions):
+        progress_col = st.columns([1, 4])
+        with progress_col[0]:
+            st.metric("Progress", f"Q{question_index + 1} of {total_questions}")
+        with progress_col[1]:
+            if isinstance(total_questions, int) and total_questions > 0:
+                progress_pct = (question_index + 1) / total_questions
+                st.progress(min(progress_pct, 1.0), text=f"{int((question_index + 1) / total_questions * 100)}% complete")
 
     for message in interview["messages"]:
         with st.chat_message(message["role"]):
@@ -389,6 +455,20 @@ def page_chatbot() -> None:
             if next_question:
                 interview["messages"].append({"role": "assistant", "content": next_question})
             interview["complete"] = result["is_complete"]
+            
+            # Update progress from backend state
+            try:
+                job_id = st.session_state.job_id
+                stored_interviews = request_json("GET", f"/jobs/{job_id}/interviews")
+                for stored_interview in stored_interviews:
+                    if stored_interview.get("session_id") == interview["session_id"]:
+                        state_data = stored_interview.get("state") or {}
+                        interview["question_index"] = state_data.get("question_index", 0)
+                        interview["planned_questions"] = state_data.get("planned_questions", [])
+                        break
+            except requests.RequestException:
+                pass
+            
             if interview["complete"]:
                 report = request_json(
                     "GET",
@@ -408,15 +488,17 @@ def page_dashboard() -> None:
     st.title("Recruiter Dashboard")
     require_job()
 
+    hydrate_job_context()
+
     candidates = st.session_state.candidates
     total = len(candidates)
     passed_filter = sum(1 for candidate in candidates if candidate.get("passed_filter"))
-    completed_reports = [
-        interview.get("report")
-        for interview in st.session_state.interviews.values()
-        if interview.get("report")
-    ]
-    advanced = sum(1 for report in completed_reports if report.get("recommendation") == "advance")
+    try:
+        final_ranking = refresh_final_ranking()
+    except requests.RequestException:
+        final_ranking = st.session_state.final_ranking
+    completed_reports = [item for item in final_ranking if item.get("interview_score") is not None]
+    advanced = sum(1 for item in final_ranking if item.get("recommendation") == "advance")
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Total CVs uploaded", total)
@@ -428,10 +510,6 @@ def page_dashboard() -> None:
 
     try:
         refresh_shortlist()
-    except requests.RequestException:
-        pass
-    try:
-        refresh_final_ranking()
     except requests.RequestException:
         pass
 
